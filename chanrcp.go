@@ -115,31 +115,9 @@ func (c *Conn) deliverChannel(chanID int, channel reflect.Value) {
 func (c *Conn) transmitSend(chanID int, x reflect.Value) error {
 	var chanList []*chanEntry
 	extractChannels(x, "", &chanList)
-
-	c.chanMutex.Lock()
-	for _, entry := range chanList {
-		if entry.Cap == 0 {
-			return errors.New("chanrpc: type error, channel must be buffered")
-		}
-		switch entry.Dir {
-		case reflect.SendDir:
-			if c.chanMap == nil { // connection closed
-				entry.channel.Close()
-				c.chanMutex.Unlock()
-				break
-			}
-			entry.ID = c.nextSendChanID
-			c.nextSendChanID++
-			c.chanMap[entry.ID] = entry.channel
-		case reflect.RecvDir:
-			entry.ID = c.nextRecvChanID
-			c.nextRecvChanID--
-			go c.deliverChannel(entry.ID, entry.channel)
-		case reflect.BothDir:
-			return errors.New("chanrpc: type error, channel must have a direction")
-		}
+	if err := c.registerChannels(chanList); err != nil {
+		return err
 	}
-	c.chanMutex.Unlock()
 
 	c.encMutex.Lock()
 	defer c.encMutex.Unlock()
@@ -188,6 +166,35 @@ func extractChannels(x reflect.Value, path string, list *[]*chanEntry) {
 			channel: x,
 		})
 	}
+}
+
+func (c *Conn) registerChannels(chanList []*chanEntry) error {
+	c.chanMutex.Lock()
+	defer c.chanMutex.Unlock()
+
+	for _, entry := range chanList {
+		if entry.Cap == 0 {
+			return errors.New("chanrpc: type error, channel must be buffered")
+		}
+		switch entry.Dir {
+		case reflect.SendDir:
+			if c.chanMap == nil { // connection closed
+				entry.channel.Close()
+				break
+			}
+			entry.ID = c.nextSendChanID
+			c.nextSendChanID++
+			c.chanMap[entry.ID] = entry.channel
+		case reflect.RecvDir:
+			entry.ID = c.nextRecvChanID
+			c.nextRecvChanID--
+			go c.deliverChannel(entry.ID, entry.channel)
+		case reflect.BothDir:
+			return errors.New("chanrpc: type error, channel must have a direction")
+		}
+	}
+
+	return nil
 }
 
 func (c *Conn) receiveValues() {
