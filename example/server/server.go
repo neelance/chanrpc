@@ -15,23 +15,27 @@ func main() {
 
 func processRequests(requests <-chan *proto.Request) {
 	for req := range requests {
-		go func(req *proto.Request) {
-			defer func() {
-				if err := recover(); err != nil {
-					log.Print(err)
-				}
-			}()
-
-			if execReq := req.Exec; execReq != nil {
+		if execReq := req.Exec; execReq != nil {
+			go func() {
+				defer recoverAndLog()
 				defer close(execReq.ReplyChan)
 				execReq.ReplyChan <- &proto.ExecReply{Stdout: []byte("f"), Stderr: []byte("b")}
 				execReq.ReplyChan <- &proto.ExecReply{Stdout: []byte("o"), Stderr: []byte("a")}
 				execReq.ReplyChan <- &proto.ExecReply{Stdout: []byte("o"), Stderr: []byte("r"), Done: true}
-			}
+			}()
+		}
 
-			if searchReq := req.Search; searchReq != nil {
+		if searchReq := req.Search; searchReq != nil {
+			go func() {
+				defer recoverAndLog()
 				// ...
-			}
-		}(req)
+			}()
+		}
+	}
+}
+
+func recoverAndLog() {
+	if err := recover(); err != nil {
+		log.Print(err)
 	}
 }
