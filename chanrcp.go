@@ -159,6 +159,9 @@ func extractChannels(x reflect.Value, path string, list *[]*chanEntry) {
 			extractChannels(x.Field(i), path+"."+x.Type().Field(i).Name, list)
 		}
 	case reflect.Chan:
+		if x.IsNil() {
+			return
+		}
 		*list = append(*list, &chanEntry{
 			Path:    path,
 			Dir:     x.Type().ChanDir(),
