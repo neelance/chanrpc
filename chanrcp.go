@@ -115,12 +115,16 @@ func (c *Conn) deliverChannel(chanID int, channel reflect.Value) {
 func (c *Conn) transmitSend(chanID int, x reflect.Value) error {
 	var chanList []*chanEntry
 	extractChannels(x, "", &chanList)
-	if err := c.registerChannels(chanList); err != nil {
-		return err
-	}
 
 	c.encMutex.Lock()
 	defer c.encMutex.Unlock()
+
+	// registerChannels needs to be protected by encMutex because else a value
+	// on a receive channel might be sent before the channel itself has
+	// reached the other side.
+	if err := c.registerChannels(chanList); err != nil {
+		return err
+	}
 
 	if err := c.enc.Encode(actionSend); err != nil {
 		return err
