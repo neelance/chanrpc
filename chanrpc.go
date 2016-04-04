@@ -24,16 +24,20 @@ type chanEntry struct {
 	channel reflect.Value
 }
 
+// Server serves the chanrpc protocol. Incoming requests get sent on RequestChan.
 type Server struct {
 	Addr        string
 	RequestChan interface{}
 }
 
+// ListenAndServe listenes on the given address and serves the chanrpc protocol. Incoming requests
+// get sent on the given channel.
 func ListenAndServe(addr string, requestChan interface{}) error {
 	srv := &Server{Addr: addr, RequestChan: requestChan}
 	return srv.ListenAndServe()
 }
 
+// ListenAndServe listenes on the Server's address and serves the chanrpc protocol.
 func (srv *Server) ListenAndServe() error {
 	ln, err := net.Listen("tcp", srv.Addr)
 	if err != nil {
@@ -42,6 +46,7 @@ func (srv *Server) ListenAndServe() error {
 	return srv.Serve(ln)
 }
 
+// Serve accepts connections on the given listener and serves the chanrpc protocol.
 func (srv *Server) Serve(l net.Listener) error {
 	defer l.Close()
 	for {
@@ -58,6 +63,7 @@ func (srv *Server) Serve(l net.Listener) error {
 	}
 }
 
+// Conn encapsulates the state of a connection between two chanrpc endpoints (server or client).
 type Conn struct {
 	dec            *gob.Decoder
 	enc            *gob.Encoder
@@ -69,6 +75,7 @@ type Conn struct {
 	chanMutex      sync.RWMutex
 }
 
+// NewConn creates a new connection which receives and sends data via the given reader and writer.
 func NewConn(r io.Reader, w io.WriteCloser) *Conn {
 	return &Conn{
 		dec:            gob.NewDecoder(r),
@@ -80,6 +87,8 @@ func NewConn(r io.Reader, w io.WriteCloser) *Conn {
 	}
 }
 
+// DialAndDeliver connects to the chanrpc server at the given address and delivers requests
+// received from the request channel to the server.
 func DialAndDeliver(addr string, requestChan interface{}) error {
 	rw, err := net.Dial("tcp", addr)
 	if err != nil {
@@ -90,6 +99,7 @@ func DialAndDeliver(addr string, requestChan interface{}) error {
 	return nil
 }
 
+// Deliver delivers requests received from the request channel to the server.
 func (c *Conn) Deliver(requestChan interface{}) {
 	go c.receiveValues()
 	c.deliverChannel(0, reflect.ValueOf(requestChan))
