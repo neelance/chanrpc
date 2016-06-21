@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/neelance/chanrpc"
 	"github.com/neelance/chanrpc/example/proto"
+	"github.com/neelance/chanrpc/gobcodec"
 )
 
 var requestsToServer = make(chan *proto.Request, 100)
@@ -21,7 +21,7 @@ func main() {
 
 func startClient() {
 	for {
-		err := chanrpc.DialAndDeliver(":7000", requestsToServer)
+		err := gobcodec.DialAndDeliver(":7000", requestsToServer)
 		log.Printf("DialAndDeliver error, reconnecting: %v", err)
 	}
 }

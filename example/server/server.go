@@ -3,14 +3,14 @@ package main
 import (
 	"log"
 
-	"github.com/neelance/chanrpc"
 	"github.com/neelance/chanrpc/example/proto"
+	"github.com/neelance/chanrpc/gobcodec"
 )
 
 func main() {
 	requests := make(chan *proto.Request)
 	go processRequests(requests)
-	log.Fatal(chanrpc.ListenAndServe(":7000", requests))
+	log.Fatal(gobcodec.ListenAndServe(":7000", requests))
 }
 
 func processRequests(requests <-chan *proto.Request) {

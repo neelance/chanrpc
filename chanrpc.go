@@ -1,22 +1,15 @@
 package chanrpc
 
 import (
-	"encoding/gob"
 	"errors"
 	"io"
 	"log"
-	"net"
 	"reflect"
 	"strings"
 	"sync"
 )
 
-type action int
-
-const actionSend action = 1
-const actionClose action = 2
-
-type chanEntry struct {
+type ChanDesc struct {
 	ID      int
 	Path    string
 	Dir     reflect.ChanDir
@@ -24,50 +17,27 @@ type chanEntry struct {
 	channel reflect.Value
 }
 
-// Server serves the chanrpc protocol. Incoming requests get sent on RequestChan.
-type Server struct {
-	Addr        string
-	RequestChan interface{}
+type Encoder interface {
+	EncodeSend(chanID int, chanList []*ChanDesc, value reflect.Value) error
+	EncodeClose(chanID int) error
 }
 
-// ListenAndServe listenes on the given address and serves the chanrpc protocol. Incoming requests
-// get sent on the given channel.
-func ListenAndServe(addr string, requestChan interface{}) error {
-	srv := &Server{Addr: addr, RequestChan: requestChan}
-	return srv.ListenAndServe()
+type Decoder interface {
+	Decode() (DecodedMessage, error)
 }
 
-// ListenAndServe listenes on the Server's address and serves the chanrpc protocol.
-func (srv *Server) ListenAndServe() error {
-	ln, err := net.Listen("tcp", srv.Addr)
-	if err != nil {
-		return err
-	}
-	return srv.Serve(ln)
-}
-
-// Serve accepts connections on the given listener and serves the chanrpc protocol.
-func (srv *Server) Serve(l net.Listener) error {
-	defer l.Close()
-	for {
-		rw, err := l.Accept()
-		if err != nil {
-			return err
-		}
-
-		go func() {
-			c := NewConn(rw, rw)
-			c.chanMap[0] = reflect.ValueOf(srv.RequestChan)
-			c.receiveValues()
-		}()
-	}
+type DecodedMessage interface {
+	ChanID() int
+	Closed() bool
+	ChanList() []*ChanDesc
+	DecodeValue(reflect.Value) error
 }
 
 // Conn encapsulates the state of a connection between two chanrpc endpoints (server or client).
 type Conn struct {
-	dec            *gob.Decoder
-	enc            *gob.Encoder
+	enc            Encoder
 	encMutex       sync.Mutex
+	dec            Decoder
 	closer         io.Closer
 	chanMap        map[int]reflect.Value
 	nextSendChanID int
@@ -76,32 +46,20 @@ type Conn struct {
 }
 
 // NewConn creates a new connection which receives and sends data via the given reader and writer.
-func NewConn(r io.Reader, w io.WriteCloser) *Conn {
+func NewConn(enc Encoder, dec Decoder, closer io.Closer) *Conn {
 	return &Conn{
-		dec:            gob.NewDecoder(r),
-		enc:            gob.NewEncoder(w),
-		closer:         w,
+		enc:            enc,
+		dec:            dec,
+		closer:         closer,
 		chanMap:        make(map[int]reflect.Value),
 		nextSendChanID: 1,
 		nextRecvChanID: -1,
 	}
 }
 
-// DialAndDeliver connects to the chanrpc server at the given address and delivers requests
-// received from the request channel to the server.
-func DialAndDeliver(addr string, requestChan interface{}) error {
-	rw, err := net.Dial("tcp", addr)
-	if err != nil {
-		return err
-	}
-	c := NewConn(rw, rw)
-	c.Deliver(requestChan)
-	return nil
-}
-
 // Deliver delivers requests received from the request channel to the server.
 func (c *Conn) Deliver(requestChan interface{}) {
-	go c.receiveValues()
+	go c.ReceiveValues()
 	c.deliverChannel(0, reflect.ValueOf(requestChan))
 }
 
@@ -123,7 +81,7 @@ func (c *Conn) deliverChannel(chanID int, channel reflect.Value) {
 }
 
 func (c *Conn) transmitSend(chanID int, x reflect.Value) error {
-	var chanList []*chanEntry
+	var chanList []*ChanDesc
 	extractChannels(x, "", &chanList)
 
 	c.encMutex.Lock()
@@ -136,35 +94,17 @@ func (c *Conn) transmitSend(chanID int, x reflect.Value) error {
 		return err
 	}
 
-	if err := c.enc.Encode(actionSend); err != nil {
-		return err
-	}
-	if err := c.enc.Encode(chanID); err != nil {
-		return err
-	}
-	if err := c.enc.EncodeValue(x); err != nil {
-		return err
-	}
-	if err := c.enc.Encode(chanList); err != nil {
-		return err
-	}
-	return nil
+	return c.enc.EncodeSend(chanID, chanList, x)
 }
 
 func (c *Conn) transmitClose(chanID int) error {
 	c.encMutex.Lock()
 	defer c.encMutex.Unlock()
 
-	if err := c.enc.Encode(actionClose); err != nil {
-		return err
-	}
-	if err := c.enc.Encode(chanID); err != nil {
-		return err
-	}
-	return nil
+	return c.enc.EncodeClose(chanID)
 }
 
-func extractChannels(x reflect.Value, path string, list *[]*chanEntry) {
+func extractChannels(x reflect.Value, path string, list *[]*ChanDesc) {
 	switch x.Kind() {
 	case reflect.Ptr:
 		extractChannels(x.Elem(), path+".*", list)
@@ -176,7 +116,7 @@ func extractChannels(x reflect.Value, path string, list *[]*chanEntry) {
 		if x.IsNil() {
 			return
 		}
-		*list = append(*list, &chanEntry{
+		*list = append(*list, &ChanDesc{
 			Path:    path,
 			Dir:     x.Type().ChanDir(),
 			Cap:     x.Cap(),
@@ -185,7 +125,7 @@ func extractChannels(x reflect.Value, path string, list *[]*chanEntry) {
 	}
 }
 
-func (c *Conn) registerChannels(chanList []*chanEntry) error {
+func (c *Conn) registerChannels(chanList []*ChanDesc) error {
 	c.chanMutex.Lock()
 	defer c.chanMutex.Unlock()
 
@@ -214,82 +154,71 @@ func (c *Conn) registerChannels(chanList []*chanEntry) error {
 	return nil
 }
 
-func (c *Conn) receiveValues() {
+func (c *Conn) SetRequestChannel(channel reflect.Value) {
+	c.chanMap[0] = channel
+}
+
+func (c *Conn) ReceiveValues() {
 receiveLoop:
 	for {
-		var act action
-		if err := c.dec.Decode(&act); err != nil {
+		m, err := c.dec.Decode()
+		if err != nil {
 			c.handleError(err)
 			break receiveLoop
 		}
 
-		var chanID int
-		if err := c.dec.Decode(&chanID); err != nil {
-			c.handleError(err)
-			break receiveLoop
-		}
 		c.chanMutex.RLock()
-		channel, ok := c.chanMap[chanID]
+		channel, ok := c.chanMap[m.ChanID()]
 		c.chanMutex.RUnlock()
 		if !ok {
 			c.handleError(errors.New("chanrpc: protocol error, unknown channel id"))
 			break receiveLoop
 		}
 
-		switch act {
-		case actionSend:
-			x := reflect.New(channel.Type().Elem())
-			if err := c.dec.DecodeValue(x); err != nil {
-				c.handleError(err)
-				break receiveLoop
-			}
-
-			var chanList []*chanEntry
-			if err := c.dec.Decode(&chanList); err != nil {
-				c.handleError(err)
-				break receiveLoop
-			}
-			for _, entry := range chanList {
-				target := x.Elem()
-				for _, field := range strings.Split(entry.Path, ".")[1:] {
-					if field == "*" {
-						target = target.Elem()
-						continue
-					}
-					target = target.FieldByName(field)
-				}
-				if target.Kind() != reflect.Chan {
-					c.handleError(errors.New("chanrpc: type error, channel expected"))
-					break receiveLoop
-				}
-				if target.Type().ChanDir() != entry.Dir {
-					c.handleError(errors.New("chanrpc: type error, wrong channel direction"))
-					break receiveLoop
-				}
-				newChannel := reflect.MakeChan(reflect.ChanOf(reflect.BothDir, target.Type().Elem()), entry.Cap)
-				target.Set(newChannel)
-				switch entry.Dir {
-				case reflect.SendDir:
-					go c.deliverChannel(entry.ID, newChannel)
-				case reflect.RecvDir:
-					c.chanMutex.Lock()
-					c.chanMap[entry.ID] = newChannel
-					c.chanMutex.Unlock()
-				}
-			}
-
-			channel.Send(x.Elem())
-
-		case actionClose:
+		if m.Closed() {
 			channel.Close()
 			c.chanMutex.Lock()
-			delete(c.chanMap, chanID)
+			delete(c.chanMap, m.ChanID())
 			c.chanMutex.Unlock()
+			continue
+		}
 
-		default:
-			c.handleError(errors.New("chanrpc: protocol error, invalid action"))
+		x := reflect.New(channel.Type().Elem())
+		if err := m.DecodeValue(x); err != nil {
+			c.handleError(err)
 			break receiveLoop
 		}
+
+		for _, entry := range m.ChanList() {
+			target := x.Elem()
+			for _, field := range strings.Split(entry.Path, ".")[1:] {
+				if field == "*" {
+					target = target.Elem()
+					continue
+				}
+				target = target.FieldByName(field)
+			}
+			if target.Kind() != reflect.Chan {
+				c.handleError(errors.New("chanrpc: type error, channel expected"))
+				break receiveLoop
+			}
+			if target.Type().ChanDir() != entry.Dir {
+				c.handleError(errors.New("chanrpc: type error, wrong channel direction"))
+				break receiveLoop
+			}
+			newChannel := reflect.MakeChan(reflect.ChanOf(reflect.BothDir, target.Type().Elem()), entry.Cap)
+			target.Set(newChannel)
+			switch entry.Dir {
+			case reflect.SendDir:
+				go c.deliverChannel(entry.ID, newChannel)
+			case reflect.RecvDir:
+				c.chanMutex.Lock()
+				c.chanMap[entry.ID] = newChannel
+				c.chanMutex.Unlock()
+			}
+		}
+
+		channel.Send(x.Elem())
 	}
 
 	c.chanMutex.Lock()
